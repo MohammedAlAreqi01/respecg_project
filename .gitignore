@@ -1,0 +1,18 @@
+# Data — too large, not ours to redistribute
+data/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Virtual envs (we use conda; environment.yml is the reproducible spec)
+venv/
+.envnotes.md 
+.Rhistory 

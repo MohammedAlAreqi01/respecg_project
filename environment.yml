@@ -1,0 +1,12 @@
+name: respecg
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.11
+  - scipy
+  - matplotlib
+  - numpy
+  - jupyter
+prefix: C:\Users\user\anaconda3\envs\respecg
