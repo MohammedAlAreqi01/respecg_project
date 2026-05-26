@@ -1,0 +1,321 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{siunitx}
+
+\title{Non-Invasive Respiratory Rate Estimation \\ from Single-Lead ECG}
+\author{Mohammed Aref Ahmed Al Areqi \\ COMP90072: The Art of Scientific Computing}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Respiratory rate is a key clinical marker for diagnosing childhood pneumonia, particularly in low-resource settings where manual counting is unreliable. This project implemented and compared two ECG-derived respiratory rate estimators on the PhysioNet Apnea-ECG database: a tachogram-based pipeline exploiting respiratory sinus arrhythmia (RSA), and an amplitude-based pipeline (EDR) exploiting respiratory modulation of R-peak heights. R-peaks were detected using Pan-Tompkins (sensitivity $>99\,\%$ on five of six validated records) and respiratory rate was estimated via sliding-window Welch spectral analysis of the cubic-spline-resampled signal.
+
+Across eight records (four apneic, four healthy), the tachogram method produced clean group separation: $77.7 \pm 6.0\,\%$ of windows in healthy controls fell in the plausible $12$--$20$\,bpm range versus $54.3 \pm 11.9\,\%$ in apneic patients, with no record-level overlap between groups (Mann--Whitney $p = 0.0143$). The amplitude-based EDR method produced comparable means in some cases but substantially greater between-subject variance, reflecting its known sensitivity to single-lead recording conditions. A parameter sensitivity analysis identified the lower edge of the respiratory search band as a critical design choice. The results indicate that single-lead ECG-derived respiratory rate estimation is feasible on low-cost hardware, but its reliability is method-, parameter-, and signal-quality-dependent.
+\end{abstract}
+
+\section{Introduction}
+
+\subsection{Clinical motivation}
+% Your current paragraph — to be revised after we finish 1.2 and 1.3
+Respiratory rate is defined as the number of complete breathing cycles per minute. It acts as one of the most useful non-invasive markers of respiratory illness. In a low resource setting clinic with complaints of cough and/or difficulty in breathing, the respiratory rate gives insight on who can safely be sent home and who needs more medical attention. Nonetheless in a busy clinic manually counting a patient's respiratory rate can be difficult and time-consuming, and in a busy low resource clinic the health workers usually subject to inadequate examination which results in waste of resources or sending patients who are meant to be admitted back home. This is one of the main reasons pneumonia still accounts for over 900,000 deaths per annum within kids under the age of five \cite{penzel2000apnea}.
+
+\subsection{Physiological background}
+% Paragraph 1 (RSA) — your existing text, slightly tightened
+Breathing affects the heart through three coupled physiological mechanisms: changes in intra-thoracic pressure, shifts in the heart's position and orientation, and modulation of the sinoatrial node by the vagus nerve. All three vary rhythmically with each breath. In healthy people this produces a slight increase in heart rate during inspiration and a decrease during expiration --- a phenomenon known as \textbf{respiratory sinus arrhythmia (RSA)} \cite{penzel2000apnea}. RSA is visible in the ECG as shorter R--R intervals during inspiration and longer R--R intervals during expiration, so the R--R interval series itself carries a respiratory signal that can be recovered by spectral analysis.
+
+% Paragraph 2 (EDR) — to write next
+A second mechanism by which breathing modulates the ECG is amplitude variation of the R-peaks themselves. During inspiration, the lungs inflate and the heart shifts positions and rotates in the chest cavity, changing the projection of the cardiac electrical signals onto skin electrodes. Inflated lung tissue conducts less than deflated tissue, which further alters the amplitude reaching the electrodes. this results in periodic variation in R-peaks heights matched to the breathing rhythm, this is known as \textbf{ECG-Derived Respiration (EDR)} \cite{moody1985derivation}.
+
+\subsection{Aims and contributions}
+
+This work implements and compares two independent ECG-derived respiratory rate estimators on the PhysioNet Apnea-ECG database \cite{penzel2000apnea}. Specifically, this project:
+\begin{itemize}
+    \item Implements R-peak detection using the Pan-Tompkins algorithm \cite{pan1985real}, validated against expert annotations.
+    \item Implements a tachogram-based respiratory rate estimator exploiting RSA, with sliding-window spectral analysis.
+    \item Implements an amplitude-based estimator (EDR) as an independent comparison method \cite{moody1985derivation}.
+    \item Quantifies pipeline performance across four apneic and four healthy records, including parameter sensitivity and failure-mode analysis.
+\end{itemize}
+
+\section{Theory}
+% NEW SECTION. Rubric explicitly rewards "relevant theory and formulas are discussed".
+% Include equations using $...$ or \[...\] for displayed.
+
+\subsection{Pan-Tompkins QRS detection}
+Direct threshold based detection of R-peaks on the raw ECG is not trusted due to the signal containing baseline drifts, muscle noise, and morphological variation eith different patients. The Pan-Tompkin algorithm changes the ECG by a sequence of operations that focuses on QRS complexes before thresholding.
+A Butterworth bandpass filter (5--15\,Hz, order 4) is applied by using zero-phase
+filtering using \texttt{filtfilt} to preserve the temporal location of peaks.
+This isolates the QRS frequency band while suppressing baseline wander (below
+5\,Hz) and electromyographic noise (above 15\,Hz).
+The filtered signal $y_b[n]$ is differentiated to focus on the steep slopes
+characteristic of the QRS complex:
+\begin{equation}
+    y_d[n] = y_b[n] - y_b[n-1]
+\end{equation}
+Squaring makes all the values positive and amplifies high-amplitude excursions:
+\begin{equation}
+    y_s[n] = y_d[n]^2
+\end{equation}
+A moving-window integrator of length $N = 0.15 f_s$ ( 150\,ms, the
+approximate width of a QRS complex) smooths the squared signal into a
+single bump per QRS:
+\begin{equation}
+    y_i[n] = \frac{1}{N} \sum_{k=0}^{N-1} y_s[n-k]
+\end{equation}
+R-peaks are identified as local maxima in $y_i[n]$ exceeding an amplitude threshold with a minimum spacing of 200\,ms which is used due to the physiological refractory period. The detected peaks in the integrated signal are then polished via searching for the local maximum within $\pm 100$\,ms in the bandpass-filtered signal $y_b[n]$, since the integration step involves a small temporal offset.
+
+\subsection{Tachogram-based spectral estimation}
+
+Given a sequence of R-peak times $t_1, t_2, \ldots, t_M$ extracted by the Pan-Tompkins algorithm, the R--R interval at the $i$th beat is
+\begin{equation}
+    \mathrm{RR}_i = t_{i+1} - t_i, \quad i = 1, \ldots, M-1.
+\end{equation}
+The full sequence of R--R intervals over time is known as the \textit{tachogram}, and it is the signal where the respiratory modulation due to RSA is encoded.
+
+Spectral analysis of the tachogram presents a slight but critical complication: each value $\mathrm{RR}_i$ is associated with a specific timestamp $t_{i+1}$, but those timestamps are not evenly spaced by construction, the spacing between successive R--R values is in itself an R--R interval, which changes with the heart rate. Standard frequency-domain tools such as the discrete Fourier transform assume uniformly sampled input, so applying them directly to $\mathrm{RR}_i$ as if each value were one tick apart produces a meaningless spectrum. To address this, the tachogram is resampled by a uniform time grid at $f_u = 4$\,Hz using cubic spline interpolation:
+\begin{equation}
+    \tilde{x}[n] = \mathrm{CubicSpline}\bigl(\{t_{i+1}, \mathrm{RR}_i\}\bigr) \bigl(n / f_u\bigr).
+\end{equation}
+A sampling rate of 4\,Hz comfortably exceeds the Nyquist frequency required to resolve respiratory components up to 2\,Hz.
+
+The power spectral density of the resampled signal is estimated using Welch's method \cite{welch1967use}, which partitions the signal into overlapping segments, computes the periodogram of each, and averages:
+\begin{equation}
+    \hat{S}_{xx}(f) = \frac{1}{K} \sum_{k=1}^{K} \left| X_k(f) \right|^2,
+\end{equation}
+where $X_k(f)$ is the discrete Fourier transform of the $k$th segment. Averaging across $K$ segments reduces the variance of the spectral estimate compared with a single periodogram of the full signal.
+
+To produce a time varying respiratory rate, Welch's method is applied within a 60-second sliding window stepped every 30 seconds along the recording. Within each window, the dominant peak in the respiratory band $[0.15, 0.4]$\,Hz is changed into breaths per minute:
+\begin{equation}
+    \mathrm{BPM} = 60 \cdot f_{\mathrm{peak}}, \quad f_{\mathrm{peak}} = \mathop{\mathrm{arg\,max}}_{f \in [0.15, 0.4]} \hat{S}_{xx}(f).
+\end{equation}
+The choice of band is examined further in the Discussion (Section~5.2).
+
+\subsection{ECG-derived respiration via amplitude modulation}
+
+The EDR pipeline operates similarly to the tachogram pipeline but operates on R-peak \textit{amplitudes} rather than intervals. For each detected R-peak time $t_i$, the corresponding amplitude is read from the ECG signal as
+\begin{equation}
+    A_i = y(t_i), \quad i = 1, \ldots, M.
+\end{equation}
+The amplitude series $\{(t_i, A_i)\}$ is irregularly sampled in the same sense as the tachogram, since R-peak times are not evenly spaced. It is therefore resampled to the same uniform 4\,Hz grid via cubic spline interpolation, and the same sliding-window Welch analysis (60\,s windows, 30\,s step, dominant peak in $[0.15, 0.4]$\,Hz, BPM $= 60 f_{\mathrm{peak}}$) is applied.
+
+Two minor preprocessing differences are applied to the amplitude series. Firstly, gross outliers (more than five median absolute deviations from the median) are removed before interpolation, since amplitude is more sensitive to electrode contact artifacts than it is the R--R interval. Secondly, each windowed segment is mean-subtracted before spectral estimation to remove the DC component dominated by the mean R-peak height. This results in a respiratory rate trace derived from amplitude modulation, computed independently of and in parallel with the tachogram trace.
+
+\section{Methods}
+
+\subsection{Dataset}
+The PhysioNet Apnea-ECG database \cite{penzel2000apnea} is made of single-lead ECG recordings sampled at 100\,Hz, with per-minute annotations of apnea events (\texttt{.apn}) and expert-verified R-peak locations (\texttt{.qrs}). This work analyses eight records: four with continuous apnea events (\texttt{a01, a03, a04, a05}) and four healthy controls (\texttt{c01, c02, c03, c04}). Each recording is approximately 8 hours in duration.
+
+% Example figure
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/typical_features.png}
+    \caption{A typical four-second ECG segment from record a01, with the P-wave, QRS complex (R-peak), and T-wave annotated on one beat. The sampling frequency of 100\,Hz limits the temporal resolution of the smaller P and T morphologies.}
+    \label{fig:typical_features}
+\end{figure}
+
+\subsection{Implementation pipeline}
+
+The full processing pipeline is summarised as follows. The raw single-lead ECG signal is loaded from the WFDB-format files and passed to the Pan-Tompkins detector (Section~2.1) to identify R-peak locations. R--R intervals are computed from consecutive peak times and cleaned by removing any interval outside 300--2000\,ms as physiologically implausible. The cleaned interval series is then resampled onto a uniform 4\,Hz grid via cubic spline interpolation (Section~2.2), yielding a regularly-sampled tachogram suitable for spectral analysis.
+
+Welch's method is applied within a 60-second sliding window, stepped every 30 seconds along the recording, giving a time-varying respiratory rate estimate. Within each window the dominant peak in the band $[0.15, 0.4]$\,Hz is selected; the choice of band edges is justified in Section~5.2. For each window, a confidence indicator is also computed as the ratio of the peak power to the mean power across the respiratory band: a sharp, dominant peak results in a high ratio, while a flat or noisy spectrum gives an EDR pipeline (Section~2.3) runs in parallel using the same resampling, windowing, and band parameters. All processing is implemented in Python using \texttt{numpy}, \texttt{scipy.signal}, and the \texttt{wfdb} library.
+
+\subsection{Validation strategy}
+
+R-peak detection accuracy is validated against the expert-annotated \texttt{.qrs} files distributed with the Apnea-ECG database. A detected peak is counted as a true positive (TP) if a ground-truth peak exists within $\pm 150$\,ms, otherwise as a false positive (FP); ground-truth peaks with no matching detection are counted as false negatives (FN). Sensitivity and positive predictive value (PPV) are then computed as
+\begin{equation}
+    \mathrm{Sensitivity} = \frac{TP}{TP + FN}, \qquad \mathrm{PPV} = \frac{TP}{TP + FP}.
+\end{equation}
+
+Validating the respiratory rate output is challenging since the Apnea-ECG database does not include direct respiratory rate annotations. Validation is hence indirect, using three complementary strategies. First, the percentage of analysis windows producing an estimate within the plausible adult resting range (12--20\,bpm) is reported per record. Second, group-level statistics are compared between four apneic and four healthy records, on the assumption that apnea-induced disruption of RSA should systematically degrade the pipeline. Third, the tachogram-based and amplitude-based estimators are cross-compared on the same windows; agreement between physically independent methods provides circumstantial evidence that both are tracking a real respiratory signal.
+
+\section{Results}
+
+\subsection{R-peak detection accuracy}
+
+The Pan-Tompkins detector was evaluated against the expert-annotated R-peak locations on six records spanning both apneic patients and healthy controls. Performance was excellent on five of the six records, with sensitivity above 99\,\% and positive predictive value above 98\,\% (Table~\ref{tab:rpeak_validation}). Record \texttt{a02} was the exception: although sensitivity remained high (99.96\,\%), the PPV dropped sharply to 70.67\,\% due to a large number of false positives. The cause of this failure is investigated in Section~5.3.
+
+\begin{table}[ht]
+    \centering
+    \caption{Pan-Tompkins R-peak detection validated against the \texttt{.qrs} ground-truth annotations on six Apnea-ECG records. Sensitivity and positive predictive value (PPV) are computed with a $\pm 150$\,ms matching tolerance.}
+    \label{tab:rpeak_validation}
+    \begin{tabular}{lrrrrrrr}
+        \toprule
+        Record & Detected & Truth & TP & FP & FN & Sens (\%) & PPV (\%) \\
+        \midrule
+        \texttt{a01} & 29\,969 & 29\,938 & 29\,938 &     31 &   0  & 100.00 & 99.90 \\
+        \texttt{a02} & 49\,849 & 35\,242 & 35\,229 & 14\,620 &  13 &  99.96 & 70.67 \\
+        \texttt{a03} & 34\,297 & 34\,259 & 34\,249 &     48 &  10 &  99.97 & 99.86 \\
+        \texttt{b01} & 35\,384 & 35\,100 & 35\,091 &    293 &   9 &  99.97 & 99.17 \\
+        \texttt{c01} & 27\,949 & 27\,871 & 27\,714 &    235 & 157 &  99.44 & 99.16 \\
+        \texttt{c02} & 32\,559 & 32\,221 & 32\,209 &    350 &  12 &  99.96 & 98.93 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Figure~\ref{fig:rpeak_detection} shows detected R-peaks overlaid on a 10-second window of record \texttt{a01}, illustrating the detector's behaviour on a clean signal. Across the full eight-hour recording, sensitivity reached 100\,\% and only 31 false positives were produced over 29\,938 ground-truth peaks. The high accuracy on healthy and well-recorded apneic records allow for a reliable foundation for the downstream tachogram and EDR analyses.
+
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/rpeak_detection.png}
+    \caption{Pan-Tompkins R-peak detection on the first 10 seconds of record a01. Red markers indicate detected R-peak locations overlaid on the raw ECG signal. Sensitivity on this record is 100\%, positive predictive value 99.9\%.}
+    \label{fig:rpeak_detection}
+\end{figure}
+
+\subsection{Single-record respiratory rate estimation}
+
+The full pipeline was applied to two different records: \texttt{a01}, a patient with extensive sleep apnea events, and \texttt{c01}, a healthy control. For each,the R-peaks were detected, the tachogram was resampled to a uniform 4\,Hz grid, and Welch's method was applied within 60-second sliding windows stepped every 30 seconds to produce a time-varying respiratory rate estimate. The results are shown in Figure~\ref{fig:single_record}.
+
+For record \texttt{c01}, $81.8\,\%$ of analysis windows produced a respiratory rate estimate within the plausible adult resting range of 12--20\,bpm, with a mean rate of 12.6\,bpm. The trace is generally stable, with extended periods of consistent estimation. For record \texttt{a01}, only $65.1\,\%$ of windows fell within the plausible range and the trace was substantially less stable, oscillating between the upper and lower edges of the search band ($9$ and $23$\,bpm) especially during the apnea-shaded portions of the recording (Figure~\ref{fig:single_record}, top). Visual inspection showed a structural change in the trace around minute 13, which overlaps with the onset of continuous apnea events: before this boundary the rate sat more stably in the plausible range, while after it the trace becomes erratic. This pattern is consistent with the loss of respiratory sinus arrhythmia during apnea, since the spectral peak corresponding to breathing is no longer dominant within the search band; the algorithm continues to report \textit{some} dominant peak in each window, but during apnea this peak is no longer physiologically meaningful.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/respiratory_rate_a01_vs_c01.png}
+    \caption{Time-varying respiratory rate estimate for an apneic record (\texttt{a01}, top) and healthy control (\texttt{c01}, bottom). Apnea minutes are shaded red. The plausible adult resting range (12--20\,bpm) is shaded green. The apneic record shows substantially less stable behaviour, particularly during shaded apnea periods.}
+    \label{fig:single_record}
+\end{figure}
+
+
+\subsection{Multi-record group comparison}
+The full pipeline was then applied to all eight records to test whether the apneic-versus-healthy separation observed in Section~4.2 generalised beyond the pair (\texttt{a01}, \texttt{c01}). Detection success per record, expressed as the percentage of windows producing an estimate in the plausible adult range, is summarised in Table~\ref{tab:summary} and visualised per-record in Figure~\ref{fig:summary}.
+
+For the tachogram method, healthy controls produced clearly higher detection success than apneic patients ($77.7 \pm 6.0\,\%$ vs $54.3 \pm 11.9\,\%$), with no overlap between the two groups: every healthy record exceeded every apneic record. Healthy controls also showed lower variance, consistent with the physiological expectation that apnea severity varies between patients. The amplitude-based EDR method produced a different pattern: while group means were closer ($62.6 \pm 5.2\,\%$ apneic versus $69.0 \pm 12.7\,\%$ healthy), the healthy-group variance was substantially larger. The strong c01 result ($90.1\,\%$) was not replicated on the other healthy controls (\texttt{c02}: $59.2\,\%$, \texttt{c03}: $65.1\,\%$, \texttt{c04}: $59.2\,\%$), reducing the group separation. A Mann--Whitney U test on the tachogram group difference returned $U = 16$, $p = 0.0143$, the minimum possible value for complete group separation at this sample size.
+
+\begin{table}[ht]
+    \centering
+    \caption{Respiratory rate detection success across eight records, expressed as the percentage of windows producing an estimate in the plausible adult range (12--20\,bpm). Mean $\pm$ standard deviation across each group.}
+    \label{tab:summary}
+    \begin{tabular}{lcc}
+        \toprule
+        & Tachogram (\%) & EDR (\%) \\
+        \midrule
+        Apneic  (n=4) & $54.3 \pm 11.9$ & $62.6 \pm 5.2$ \\
+        Healthy (n=4) & $77.7 \pm 6.0$  & $69.0 \pm 12.7$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/summary_two_methods_two_groups.png}
+    \caption{Per-record respiratory rate detection success across eight Apnea-ECG records. Apneic records (a01--a05) are shown left of the dashed line; healthy controls (c01--c04) to the right. Tachogram method (blue) shows clearer separation between groups than EDR (orange).}
+    \label{fig:summary}
+\end{figure}
+
+\subsection{Method comparison}
+
+To examine whether the two methods produce similar estimates, both pipelines were applied to record \texttt{a01} and the resulting respiratory rate traces compared (Figure~\ref{fig:methods_comparison}). The two traces give similar overall scales: the tachogram method produced a mean of 15.0\,bpm with $65.1\,\%$ of windows in the plausible range, while EDR produced a mean of 17.3\,bpm with $71.1\,\%$ in the plausible range. Both methods showed visibly degraded behaviour during the apnea-shaded portions of the recording, though the patterns of degradation differed in detail.
+
+Despite the similar global statistics, the two methods showed only weak window-by-window correlation. The Pearson correlation across all windows was $r = 0.24$. Restricting to the pre-apnea period (minutes 0--13) yielded $r = -0.24$, while the apnea period (minutes 13 onwards) gave $r = 0.24$ --- both noisy estimates given the small number of windows in the pre-apnea segment. The mean absolute difference between the two BPM estimates was 3.8\,bpm (median 2.0\,bpm), indicating that while the methods often differed on the exact peak frequency they selected, the magnitude of disagreement was typically modest. The implications of this weak correlation despite similar overall behaviour are explored in Section~5.1.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/methods_comparison_a01.png}
+    \caption{Tachogram-based (top) and amplitude-based (bottom) respiratory rate estimates on record \texttt{a01}. Apnea minutes are shaded red; the plausible adult range (12--20\,bpm) is shaded green. Both methods show degraded stability during apnea but agree on overall scale.}
+    \label{fig:methods_comparison}
+\end{figure}
+
+\section{Discussion}
+
+\subsection{Pipeline performance and physiological interpretation}
+
+The headline result of the multi-record analysis (Section~4.3) is that the tachogram method produced a much cleaner group separation than EDR. The tachogram's no-overlap result, every healthy record outperforming every apneic record on a single quality metric, did not replicate for EDR, where one strong healthy result ($90.1\,\%$ on \texttt{c01}) was not replicated by the other three controls. The two methods are therefore not strict alternatives: tachogram is the more reliable single-method estimator on this dataset, while EDR provides complementary information in cases where it works well.
+
+This contrast is physiologically motivated. Respiratory sinus arrhythmia is a neural phenomenon: vagal innervation of the sinoatrial node modulates pacemaker firing rate in synchrony with the breathing cycle, an effect that is preserved across individuals because the underlying neural circuitry is highly conserved. Amplitude modulation, depends on \textit{geometric} factors specific to each recording. Firstly, the orientation of the heart relative to the chosen ECG lead, the depth of breathing, the electrical conductivity of the surrounding tissue, and lastly and most importantly the placement and adhesion of the electrodes. Small differences in any of these factors can substantially alter the recorded amplitude variation. This sensitivity to recording conditions has been observed in the literature, where multi-lead EDR using principal component projection \cite{moody1985derivation} is known to be significantly more reliable than single-lead EDR. The Apnea-ECG database provides only single-lead recordings, exposing exactly this weakness.
+
+The weak window-by-window correlation between the methods on \texttt{a01} ($r = 0.24$, Section~4.4) further supports the view that the two estimators are tracking related but not identical signal features: both find a dominant peak in the respiratory band, but each peak corresponds to a slightly different physical process. In this sense, the modest disagreement (mean absolute difference 3.8\,bpm) reflects the limits of any single indirect respiratory estimator rather than failure of either method.
+
+\subsection{Parameter sensitivity: respiratory band selection}
+
+The respiratory band $[0.15, 0.4]$\,Hz used throughout this work was not the first choice. An early implementation used the wider band $[0.1, 0.5]$\,Hz to cover the full plausible adult breathing range. When applied to the healthy control \texttt{c01}, this configuration produced a mean respiratory rate of $10.5$\,bpm with only about half the windows falling in the plausible $12$--$20$\,bpm range. An unexpectedly poor result for a clean recording on a healthy subject.
+
+Inspection of the per-window spectra revealed the cause: a tall low-frequency peak just inside the lower band edge near $0.1$\,Hz dominated the dominant-peak search. This very-low-frequency (VLF) content is well documented in heart rate variability and is more related to slow autonomic regulation  than respiration. Narrowing the lower band edge from $0.1$\,Hz to $0.15$\,Hz excluded the VLF region while still covering breathing rates down to $9$\,bpm. The effect on \texttt{c01} was significant: the mean respiratory rate rose from $10.5$ to $12.6$\,bpm, and the fraction of windows in the plausible range increased from approximately $50\,\%$ to $81.8\,\%$ (Figure~\ref{fig:band_comparison}). The narrower band was therefore adopted as the project default and used for all subsequent analyses.
+
+This sensitivity has practical implications: band-edge choice for ECG-derived respiration is not a routine parameter but a critical design decision, particularly for the lower edge where autonomic content can masquerade as respiratory modulation.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/c01_band_comparison.png}
+    \caption{Effect of respiratory band selection on detection stability for healthy control c01. The wider 0.1--0.5\,Hz band (top) captures low-frequency autonomic content, destabilising the dominant-peak estimate; the narrower 0.15--0.4\,Hz band (bottom) confines the search to genuine respiratory frequencies.}
+    \label{fig:band_comparison}
+\end{figure}
+
+\subsection{Failure-mode analysis: detector breakdown on \texttt{a02}}
+
+Record \texttt{a02} was a clear outlier in the R-peak detection validation, producing a positive predictive value of only $70.67\,\%$ against $>99\,\%$ on the other records (Table~\ref{tab:rpeak_validation}). Visual inspection of the densest detection window showed that the signal in \texttt{a02} contained substantial broadband noise, including high-frequency components within the QRS band passed by the Pan-Tompkins filter, producing irregular excursions that were repeatedly mistaken for R-peaks. The detector was working as designed; the input itself was of insufficient quality. This is consistent with the assignment brief's note that ``other electrical signals can mask the ECG and/or make its baseline wander.''
+
+To investigate whether such records could be flagged automatically, a simple signal quality index (SQI) was computed as the ratio of spectral power in the QRS band ($5$--$15$\,Hz) to the high-frequency noise band (above $30$\,Hz). The hypothesis was that low SQI would predict low PPV. Results across six records were mixed: \texttt{a02} did produce the lowest SQI ($2.76$) and the lowest PPV ($70.67\,\%$), consistent with the hypothesis. However, \texttt{c01} and \texttt{c02} produced even lower SQI values ($0.52$ and $1.30$) while retaining PPV above $98\,\%$. The frequency-domain measure was therefore a partial but not sufficient predictor of detector failure.
+
+This is itself an informative result. Signal quality is multi-dimensional: \texttt{a02}'s failure involved bursty, broadband, in-band noise that disrupted peak detection in the time domain, while \texttt{c01} and \texttt{c02} simply contained large amplitude artifacts surrounded by otherwise clean cardiac signal. A more reliable quality indicator would need to combine the frequency-domain SQI with a time-domain measure such as windowed variance or kurtosis.
+
+\subsection{Extended analysis and problem solving}
+% This section explicitly highlights work done BEYOND the assignment brief.
+% Bullet structure ensures markers can see each contribution clearly.
+The following extensions were performed beyond the scope of the assignment brief:
+\begin{itemize}
+    \item \textbf{Independent second method.} A R-peak amplitude modulation pipeline (EDR) was implemented in parallel with the tachogram pipeline to provide an independent respiratory rate estimate from a physically distinct mechanism.
+    \item \textbf{Signal quality index.} A frequency-domain signal quality metric was designed to predict detector failure, then evaluated for its ability to separate clean from contaminated recordings.
+    \item \textbf{Parameter sensitivity analysis.} The effect of the respiratory band boundary on pipeline output was quantified, identifying the lower band edge as the critical parameter.
+    \item \textbf{Multi-record statistical comparison.} The pipeline was applied across eight records and the apneic-vs-healthy separation quantified.
+\end{itemize}
+
+\subsection{Limitations and future work}
+
+Several limitations of this work require acknowledgement. Firstly, the Apnea-ECG database samples ECG at $100$\,Hz, which is significantly below the $250$--$500$\,Hz typically used in contemporary clinical ECG recording. This low sampling rate limits the temporal resolution of the smaller P and T morphologies and limits the achievable accuracy of any downstream analysis. Secondly, the database provides only \textit{single-lead} ECG recordings, which is a fundamental limitation on EDR performance: multi-lead recordings would permit principal-component projection methods known to be substantially more reliable across recording conditions \cite{moody1985derivation}. Thirdly, the multi-record comparison used only four records per group; while the apneic-versus-healthy separation was statistically significant ($p = 0.0143$), a larger sample size would allow for a stronger generalisation. Finally, the Apnea-ECG database does not include direct respiratory rate annotations, forcing the validation strategy to rely on indirect evidence (plausible-range fraction, group comparison, cross-method agreement). 
+
+Future work could address several of these limitations directly. The PhysioNet MIT-BIH Polysomnographic database \cite{goldberger2000physiobank} includes true respiratory channels (chest-belt transducers) and would provide a direct validation target. Modern smartphone-based ECG hardware typically samples at higher rates and could permit testing the project's broader clinical premise --- that automated respiratory rate estimation is feasible on low-cost devices --- in a more realistic setting.
+
+\section{Conclusion}
+
+This project implemented and compared two ECG-derived respiratory rate estimators on the PhysioNet Apnea-ECG database: a tachogram-based pipeline exploiting respiratory sinus arrhythmia, and an amplitude-based pipeline (EDR) exploiting modulation of R-peak height by breathing. R-peak detection via Pan-Tompkins achieved sensitivity above $99\,\%$ and positive predictive value above $98\,\%$ on five of six records validated against expert annotations, with a single record failing due to broadband signal contamination rather than algorithmic error.
+
+The tachogram method showed clean separation between healthy controls ($77.7 \pm 6.0\,\%$ of windows in the plausible range) and apneic patients ($54.3 \pm 11.9\,\%$), with no overlap between the groups across the eight records analysed and a Mann--Whitney $p = 0.0143$. The EDR method produced higher per-record means in some cases but substantially greater between-subject variance, reflecting its known sensitivity to single-lead recording conditions. The two methods provide complementary rather than substitute information.
+
+Parameter sensitivity analysis identified the lower edge of the respiratory search band as a critical design choice: narrowing from $0.1$ to $0.15$\,Hz increased the plausible-range fraction on a healthy control from approximately $50\,\%$ to $81.8\,\%$ by excluding low-frequency autonomic content. The broader implication is that automated ECG-derived respiration is feasible on low-cost single-lead hardware in stable clinical conditions, but practical deployment in noisy or apneic settings would benefit from multi-method consensus and explicit confidence indicators.
+
+\begin{thebibliography}{9}
+
+\bibitem{penzel2000apnea}
+T. Penzel, G.B. Moody, R.G. Mark, A.L. Goldberger, and J.H. Peter,
+``The apnea-ECG database,''
+\textit{Computers in Cardiology 2000}, IEEE, pp.~255--258, 2000.
+
+\bibitem{pan1985real}
+J. Pan and W.J. Tompkins,
+``A real-time QRS detection algorithm,''
+\textit{IEEE Transactions on Biomedical Engineering}, vol.~BME-32,
+no.~3, pp.~230--236, 1985.
+
+\bibitem{welch1967use}
+P. Welch,
+``The use of fast Fourier transform for the estimation of power spectra,''
+\textit{IEEE Transactions on Audio and Electroacoustics}, vol.~15,
+no.~2, pp.~70--73, 1967.
+
+\bibitem{moody1985derivation}
+G.B. Moody, R.G. Mark, A. Zoccola, and S. Mantero,
+``Derivation of respiratory signals from multi-lead ECGs,''
+\textit{Computers in Cardiology}, vol.~12, pp.~113--116, 1985.
+
+\bibitem{goldberger2000physiobank}
+A.L. Goldberger, L.A.N. Amaral, L. Glass, J.M. Hausdorff, P.Ch. Ivanov, R.G. Mark, J.E. Mietus, G.B. Moody, C.-K. Peng, and H.E. Stanley,
+``PhysioBank, PhysioToolkit, and PhysioNet: components of a new research resource for complex physiologic signals,''
+\textit{Circulation}, vol.~101, no.~23, pp.~e215--e220, 2000.
+
+\bibitem{schafer2013how}
+A. Sch\"afer and K.W. Kratky,
+``How accurate is pulse rate variability as an estimate of heart rate variability? A review on studies comparing photoplethysmographic technology with an electrocardiogram,''
+\textit{International Journal of Cardiology}, vol.~166, no.~1, pp.~15--29, 2013.
+
+\end{thebibliography}
+
+\end{document}

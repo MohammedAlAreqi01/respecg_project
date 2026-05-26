@@ -12,7 +12,10 @@ Two independent ECG-derived respiration techniques are implemented:
   analysis → dominant peak in the 0.15–0.4 Hz respiratory band.
 - **EDR (amplitude-based):** R-peak amplitudes → cubic spline resampling →
   same spectral pipeline.
+## Report
 
+The full project report is available at [report/main.pdf](report/main.pdf).
+LaTeX source: [report/main.tex](report/main.tex).
 ## Results summary
 
 Across 8 records (4 apneic, 4 healthy controls):

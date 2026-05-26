@@ -14,5 +14,6 @@ Thumbs.db
 
 # Virtual envs (we use conda; environment.yml is the reproducible spec)
 venv/
-.envnotes.md 
-.Rhistory 
+.env
+notes.md
+.Rhistory
